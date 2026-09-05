@@ -646,6 +646,23 @@ pub trait Write<'a, 'db: 'a>: Core<'a, 'db> + RegistrySealed<'a, 'db> {
         Ok(value)
     }
 
+    /// Look up or insert a constructor row with its subsume flag SET —
+    /// the row is born retired (no one-round live window). Existing
+    /// staged rows merge sticky (max), so a same-action live insert of
+    /// the identical row stays retired; callers who must preserve
+    /// committed live rows should check [`Read::contains`] first.
+    /// (LOCAL PATCH — proposed upstream alongside egglog-experimental #60.)
+    fn add_subsumed<K: IntoValues>(&mut self, name: &str, key: K) -> Result<Value, Error> {
+        let action = lookup_action(self.registry(), self.es(), name)?;
+        check_subtype(name, &action, TableKind::Constructor)?;
+        let key_values: ValueRow = key.into_values(self.base_values()).collect();
+        check_arity(name, &action, key_values.len())?;
+        let value = action
+            .lookup_or_insert_subsumed(self.es_mut(), &key_values)
+            .expect("constructor lookup_or_insert_subsumed returned None");
+        Ok(value)
+    }
+
     /// Remove a row from the named table. Works for any subtype.
     fn remove<K: IntoValues>(&mut self, name: &str, key: K) -> Result<(), Error> {
         let action = lookup_action(self.registry(), self.es(), name)?;
