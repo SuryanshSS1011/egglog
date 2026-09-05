@@ -1549,6 +1549,47 @@ impl TableAction {
         }
     }
 
+    /// Look up a row, inserting it with its subsume flag SET if absent —
+    /// the row is born retired, with no live window. Written for the
+    /// substitution walk: the copy of an already-subsumed source row must
+    /// never become matchable material. The subsume column merges by max
+    /// (sticky), so calling this on a row staged live in the same action
+    /// retires it; committed rows should be checked by the caller first.
+    /// (LOCAL PATCH — proposed upstream alongside egglog-experimental #60.)
+    pub fn lookup_or_insert_subsumed(
+        &self,
+        state: &mut ExecutionState,
+        key: &[Value],
+    ) -> Option<Value> {
+        match self.default {
+            Some(default) => {
+                let timestamp =
+                    MergeVal::Constant(Value::from_usize(state.read_counter(self.timestamp)));
+                let mut merge_vals = SmallVec::<[MergeVal; 3]>::new();
+                SchemaMath {
+                    func_cols: 1,
+                    ..self.table_math
+                }
+                .write_table_row(
+                    &mut merge_vals,
+                    RowVals {
+                        timestamp,
+                        subsume: self
+                            .table_math
+                            .subsume
+                            .then_some(MergeVal::Constant(SUBSUMED)),
+                        ret_val: Some(default),
+                    },
+                );
+                Some(
+                    state.predict_val(self.table, key, merge_vals.iter().copied())
+                        [self.table_math.ret_val_col()],
+                )
+            }
+            None => self.lookup(state, key),
+        }
+    }
+
     /// Insert a row into this table.
     pub fn insert(&self, state: &mut ExecutionState, row: impl Iterator<Item = Value>) {
         let ts = Value::from_usize(state.read_counter(self.timestamp));
