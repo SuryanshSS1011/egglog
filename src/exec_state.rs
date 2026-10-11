@@ -32,6 +32,7 @@
 
 use std::any::TypeId;
 use std::ops::Deref;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::Error;
 use crate::api::{ApiError, IntoValue, IntoValues};
@@ -52,6 +53,41 @@ use smallvec::SmallVec;
 /// Inline scratch for a row of column values. Matches the
 /// `SmallVec<[_; 8]>` that `egglog_bridge::TableAction` uses internally.
 type ValueRow = SmallVec<[Value; 8]>;
+
+/// Stable storage classification of a declared sort. Container classification
+/// deliberately includes containers whose declared inner sorts are opaque:
+/// their values can capture e-classes (for example an unstable function).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortStorageKind {
+    Eclass,
+    Container(TypeId),
+    Opaque,
+}
+
+impl SortStorageKind {
+    pub fn of(sort: &crate::ArcSort) -> Self {
+        if sort.is_eq_sort() {
+            Self::Eclass
+        } else if sort.is_container_sort() {
+            Self::Container(sort.value_type().expect("container sort has a value type"))
+        } else {
+            Self::Opaque
+        }
+    }
+}
+
+/// Immutable constructor declaration metadata; never caches rows or unions.
+pub struct ConstructorMetadata {
+    pub schema: Arc<FuncType>,
+    pub input_kinds: Vec<SortStorageKind>,
+}
+
+/// Constructor metadata for one type schema and live table registration
+/// snapshot. Indices and order follow the registry's table enumeration.
+pub struct ConstructorCatalog {
+    pub constructors: Vec<ConstructorMetadata>,
+    pub by_output: HashMap<String, Vec<usize>>,
+}
 
 /// The four contexts a primitive may run in, named after the
 /// capability profile they grant. Each variant maps 1:1 to one of the
@@ -422,6 +458,21 @@ pub trait Read<'a, 'db: 'a>: Core<'a, 'db> + RegistrySealed<'a, 'db> {
     /// Snapshot the registered table names and their current row counts.
     fn table_sizes(&self) -> Vec<(&str, usize)> {
         self.registry().table_sizes(self.es())
+    }
+
+    /// Registered names without row-count work.
+    fn table_names(&self) -> Vec<&str> {
+        self.registry().table_names().collect()
+    }
+
+    /// Shared immutable constructor declarations and input sort kinds. Refreshes
+    /// after type declarations or table registration changes, including cloned
+    /// e-graphs that diverge. Every walk still reads current database rows.
+    fn constructor_catalog(&self) -> Result<Arc<ConstructorCatalog>, Error> {
+        let types = self.type_info().ok_or_else(|| {
+            Error::BackendError("constructor metadata requires a type schema".into())
+        })?;
+        Ok(types.constructor_catalog(self.registry()))
     }
 
     /// Call `f` on each [`Enode`] of a constructor / relation table.

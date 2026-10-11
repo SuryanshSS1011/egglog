@@ -6,7 +6,7 @@ use egglog::ast::Span;
 use egglog::constraint::{SimpleTypeConstraint, TypeConstraint};
 use egglog::prelude::*;
 use egglog::sort::{I64Sort, MapContainer, S, StringSort, VecContainer};
-use egglog::{ApiError, Core, Error, Primitive, Read, ReadPrim, ReadState, Value};
+use egglog::{ApiError, Core, Error, Primitive, Read, ReadPrim, ReadState, Value, Write};
 use std::any::TypeId;
 
 const MATH: &str = "
@@ -225,6 +225,123 @@ fn a_primitive_can_resolve_a_signature_from_inside_a_rule() -> Result<(), Error>
 (run 1)
 (check (= (arity-of "Add") 2))
 "#,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn constructor_catalog_reuses_metadata_but_observes_live_rows() -> Result<(), Error> {
+    use std::sync::Arc;
+    let mut egraph = EGraph::default();
+    egraph.parse_and_run_program(None, MATH)?;
+    let before = egraph.read(|state| state.constructor_catalog())?;
+    let mut names = egraph.read(|state| {
+        state
+            .table_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    });
+    let mut counted_names = egraph.read(|state| {
+        state
+            .table_sizes()
+            .into_iter()
+            .map(|(name, _)| name.to_owned())
+            .collect::<Vec<_>>()
+    });
+    names.sort();
+    counted_names.sort();
+    assert_eq!(names, counted_names);
+    assert_eq!(before.constructors.len(), 3);
+    assert!(before.constructors.iter().all(|c| c.schema.name != "cost"));
+    egraph.update(|mut state| {
+        let a = state.add("Num", (1_i64,))?;
+        let b = state.add("Num", (2_i64,))?;
+        state.union(a, b)?;
+        Ok(())
+    })?;
+    let after = egraph.read(|state| state.constructor_catalog())?;
+    assert!(Arc::ptr_eq(&before, &after));
+    assert_eq!(egraph.read(|state| state.table_size("Num")), Some(2));
+    for &index in &after.by_output["Math"] {
+        let c = &after.constructors[index];
+        assert_eq!(c.schema.output.name(), "Math");
+        for (sort, kind) in c.schema.input.iter().zip(&c.input_kinds) {
+            assert_eq!(*kind, egglog::SortStorageKind::of(sort));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn constructor_catalog_isolated_after_clones_and_push_pop() -> Result<(), Error> {
+    use std::sync::Arc;
+    let mut original = EGraph::default();
+    original.parse_and_run_program(None, MATH)?;
+    let initial = original.read(|s| s.constructor_catalog())?;
+    let mut branch = original.clone();
+    branch.parse_and_run_program(None, "(constructor Mul (Math Math) Math)")?;
+    let branched = branch.read(|s| s.constructor_catalog())?;
+    assert!(!Arc::ptr_eq(&initial, &branched));
+    assert!(branched.constructors.iter().any(|c| c.schema.name == "Mul"));
+    let original_after_branch = original.read(|s| s.constructor_catalog())?;
+    assert!(
+        original_after_branch
+            .constructors
+            .iter()
+            .all(|c| c.schema.name != "Mul")
+    );
+    assert!(Arc::ptr_eq(
+        &original_after_branch,
+        &original.read(|s| s.constructor_catalog())?
+    ));
+    original.parse_and_run_program(None, "(push 1) (constructor Neg (Math) Math)")?;
+    let pushed = original.read(|s| s.constructor_catalog())?;
+    assert!(pushed.constructors.iter().any(|c| c.schema.name == "Neg"));
+    assert!(pushed.constructors.iter().all(|c| c.schema.name != "Mul"));
+    original.parse_and_run_program(None, "(pop 1)")?;
+    let popped = original.read(|s| s.constructor_catalog())?;
+    assert!(popped.constructors.iter().all(|c| c.schema.name != "Neg"));
+    assert!(popped.constructors.iter().all(|c| c.schema.name != "Mul"));
+    assert!(Arc::ptr_eq(
+        &popped,
+        &original.read(|s| s.constructor_catalog())?
+    ));
+    Ok(())
+}
+
+#[derive(Clone)]
+struct LiveConstructorCount;
+impl Primitive for LiveConstructorCount {
+    fn name(&self) -> &str {
+        "live-constructor-count"
+    }
+    fn get_type_constraints(&self, span: &Span) -> Box<dyn TypeConstraint> {
+        SimpleTypeConstraint::new(self.name(), vec![I64Sort.to_arcsort()], span.clone()).into_box()
+    }
+}
+impl egglog::FullPrim for LiveConstructorCount {
+    fn apply<'a, 'db>(&self, state: egglog::FullState<'a, 'db>, _args: &[Value]) -> Option<Value> {
+        let count = state.constructor_catalog().ok()?.constructors.len() as i64;
+        Some(state.base_values().get::<i64>(count))
+    }
+}
+
+#[test]
+fn constructor_catalog_does_not_expose_not_yet_registered_declarations() -> Result<(), Error> {
+    let mut egraph = EGraph::default();
+    egraph.add_full_primitive(LiveConstructorCount, None);
+    egraph.parse_and_run_program(
+        None,
+        r#"
+      (sort T)
+      (constructor First () T)
+      (let n1 (live-constructor-count))
+      (constructor Second () T)
+      (let n2 (live-constructor-count))
+      (check (= n1 1))
+      (check (= n2 2))
+    "#,
     )?;
     Ok(())
 }

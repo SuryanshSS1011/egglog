@@ -53,6 +53,9 @@ use thiserror::Error;
 #[derive(Clone)]
 pub struct ActionRegistry {
     table_actions: hashbrown::HashMap<String, TableAction>,
+    /// Identity of the live table registration snapshot, shared by clones.
+    /// Keeping the token alive prevents address reuse in metadata caches.
+    schema_identity: Arc<()>,
     union_action: UnionAction,
     default_panic_id: ExternalFunctionId,
 }
@@ -61,6 +64,7 @@ impl ActionRegistry {
     pub(crate) fn new(union_action: UnionAction, default_panic_id: ExternalFunctionId) -> Self {
         Self {
             table_actions: hashbrown::HashMap::new(),
+            schema_identity: Arc::new(()),
             union_action,
             default_panic_id,
         }
@@ -68,6 +72,18 @@ impl ActionRegistry {
 
     pub(crate) fn register_table(&mut self, name: String, action: TableAction) {
         self.table_actions.insert(name, action);
+        self.schema_identity = Arc::new(());
+    }
+
+    /// Registered names without inspecting or counting any live rows.
+    pub fn table_names(&self) -> impl Iterator<Item = &str> {
+        self.table_actions.keys().map(String::as_str)
+    }
+
+    /// Changes on every table registration, including replacement. Database
+    /// writes and unions do not change the declaration snapshot.
+    pub fn schema_identity(&self) -> &Arc<()> {
+        &self.schema_identity
     }
 
     /// Look up the [`TableAction`] for a table by name, or `None` if

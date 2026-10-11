@@ -1,6 +1,7 @@
 use std::hash::Hasher;
 
 use crate::Context;
+use crate::exec_state::{ConstructorCatalog, ConstructorMetadata, SortStorageKind};
 use crate::proofs::proof_container_rebuild::register_container_rebuild_from_spec;
 use crate::{
     core::{CoreActionContext, CoreRule, GenericActionsExt, ResolvedCall},
@@ -14,7 +15,9 @@ use core_relations::ExternalFunction;
 use egglog_ast::generic_ast::GenericAction;
 use egglog_bridge::ActionRegistry;
 use enum_map::EnumMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+
+type ConstructorCatalogCache = Arc<Mutex<Option<(Arc<()>, Arc<ConstructorCatalog>)>>>;
 
 // `ExternalFunction` wrapper for `PurePrim`. Holds the primitive
 // directly so the dispatch chain `external_funcs[id].invoke(...)` →
@@ -212,6 +215,7 @@ pub struct TypeInfo {
     pub(crate) sorts: HashMap<String, Arc<dyn Sort>>,
     primitives: HashMap<String, Vec<PrimitiveWithId>>,
     func_types: HashMap<String, Arc<FuncType>>,
+    constructor_catalog_cache: ConstructorCatalogCache,
     pub(crate) global_sorts: HashMap<String, ArcSort>,
     /// Sorts that do not allow union (e.g., from `:no-union` sorts or relations).
     pub(crate) non_unionable_sorts: HashSet<String>,
@@ -784,11 +788,7 @@ impl TypeInfo {
             ));
         }
         let ftype = self.function_to_functype(fdecl)?;
-        if self
-            .func_types
-            .insert(fdecl.name.clone(), Arc::new(ftype))
-            .is_some()
-        {
+        if self.insert_func_type(Arc::new(ftype)).is_some() {
             return Err(TypeError::FunctionAlreadyBound(
                 fdecl.name.clone(),
                 fdecl.span.clone(),
@@ -1151,7 +1151,52 @@ impl TypeInfo {
     /// typechecking — desugaring generates some (global bindings, proof
     /// tables) directly.
     pub(crate) fn declare_func_type(&mut self, func_type: Arc<FuncType>) {
-        self.func_types.insert(func_type.name.clone(), func_type);
+        self.insert_func_type(func_type);
+    }
+
+    fn insert_func_type(&mut self, func_type: Arc<FuncType>) -> Option<Arc<FuncType>> {
+        // TypeInfo clones share immutable metadata until a declaration diverges.
+        // Fork the cache rather than invalidating another e-graph's snapshot.
+        self.constructor_catalog_cache = Default::default();
+        self.func_types.insert(func_type.name.clone(), func_type)
+    }
+
+    pub(crate) fn constructor_catalog(&self, registry: &ActionRegistry) -> Arc<ConstructorCatalog> {
+        let mut cached = self
+            .constructor_catalog_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((identity, catalog)) = &*cached {
+            if Arc::ptr_eq(identity, registry.schema_identity()) {
+                return catalog.clone();
+            }
+        }
+        let mut catalog = ConstructorCatalog {
+            constructors: Vec::new(),
+            by_output: Default::default(),
+        };
+        // Typechecking can know declarations that have not been registered by
+        // command execution yet. Restrict the catalogue to actual live tables.
+        for name in registry.table_names() {
+            let Some(schema) = self.func_types.get(name) else {
+                continue;
+            };
+            if schema.subtype != FunctionSubtype::Constructor || !schema.output.is_eq_sort() {
+                continue;
+            }
+            catalog
+                .by_output
+                .entry(schema.output.name().to_owned())
+                .or_default()
+                .push(catalog.constructors.len());
+            catalog.constructors.push(ConstructorMetadata {
+                schema: schema.clone(),
+                input_kinds: schema.input.iter().map(SortStorageKind::of).collect(),
+            });
+        }
+        let catalog = Arc::new(catalog);
+        *cached = Some((registry.schema_identity().clone(), catalog.clone()));
+        catalog
     }
 
     pub fn is_constructor(&self, sym: &str) -> bool {

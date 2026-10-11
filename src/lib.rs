@@ -44,7 +44,8 @@ use egglog_core_relations as core_relations;
 use egglog_numeric_id as numeric_id;
 use egglog_reports::{ReportLevel, RunReport};
 pub use exec_state::{
-    Context, Core, Enode, FullState, FunctionEntry, PureState, Read, ReadState, Write, WriteState,
+    ConstructorCatalog, ConstructorMetadata, Context, Core, Enode, FullState, FunctionEntry,
+    PureState, Read, ReadState, SortStorageKind, Write, WriteState,
 };
 use extract::{DefaultCost, Extractor, TreeAdditiveCostModel};
 use indexmap::map::Entry;
