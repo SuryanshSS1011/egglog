@@ -653,7 +653,7 @@ pub trait Write<'a, 'db: 'a>: Core<'a, 'db> + RegistrySealed<'a, 'db> {
     /// committed live rows should check [`Read::contains`] first.
     /// (LOCAL PATCH — proposed upstream alongside egglog-experimental #60.)
     fn add_subsumed<K: IntoValues>(&mut self, name: &str, key: K) -> Result<Value, Error> {
-        let action = lookup_action(self.registry(), name)?;
+        let action = lookup_action(self.registry(), self.es(), name)?;
         check_subtype(name, &action, TableKind::Constructor)?;
         let key_values: ValueRow = key.into_values(self.base_values()).collect();
         check_arity(name, &action, key_values.len())?;
