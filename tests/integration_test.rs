@@ -1321,3 +1321,26 @@ fn clear_function_unknown_function_errors() {
         other => panic!("expected UnboundFunction, got {other:?}"),
     }
 }
+
+#[test]
+fn query_shadowing_scopes_allow_repeated_references_and_reuse_rule_locals() {
+    EGraph::default()
+        .parse_and_run_program(
+            None,
+            r#"
+        (relation R (i64))
+        (R 1)
+        (check (R x) (= x x) (= x 1))
+        (check (R x) (= x 1))
+        (rule ((R x) (= x x)) ((let y (+ x 1)) (R y)) :name "first")
+        (rule ((R x)) ((let y (+ x 2)) (R y)) :name "second")
+        (fail (check (R x) (= x 2)))
+        (check (R x) (= x 1))
+        (push)
+        (let $x 3)
+        (pop)
+        (check (R x) (= x 1))
+    "#,
+        )
+        .unwrap();
+}

@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    common::IndexSet,
+    common::{HashMap, IndexSet},
     hash_index::IndexCatalog,
     numeric_id::{DenseIdMap, DenseIdMapWithReuse, NumericId, define_id},
 };
@@ -560,13 +560,13 @@ impl Database {
                     Option<TableInfo>,
                     // Pre-allocated write buffers, according to the tables declared write
                     // dependencies.
-                    DenseIdMap<TableId, Box<dyn MutationBuffer>>,
+                    HashMap<TableId, Box<dyn MutationBuffer>>,
                 ),
             >::with_capacity(self.tables.n_ids());
             for stratum in self.deps.strata() {
                 // Initialize the write dependencies first.
                 for table in stratum.intersection(&to_merge).copied() {
-                    let mut bufs = DenseIdMap::default();
+                    let mut bufs = HashMap::default();
                     for dep in self.deps.write_deps(table) {
                         if let Some(info) = self.tables.get(dep) {
                             bufs.insert(dep, info.table.new_buffer());

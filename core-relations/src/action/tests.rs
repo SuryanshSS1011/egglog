@@ -148,3 +148,64 @@ fn test_early_stop_multiple_clones() {
     assert!(state2.should_stop());
     assert!(state3.should_stop());
 }
+
+#[test]
+fn sparse_mutation_buffers_preserve_notifications_fresh_handles_and_drop_flush() {
+    use super::{MutationBuffer, MutationBuffers, TableId, Value};
+    use crate::numeric_id::NumericId;
+    use egglog_concurrency::NotificationList;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Buffered {
+        staged: Vec<(bool, Vec<Value>)>,
+        flushed: Arc<Mutex<Vec<(bool, Vec<Value>)>>>,
+    }
+    impl MutationBuffer for Buffered {
+        fn stage_insert(&mut self, row: &[Value]) {
+            self.staged.push((true, row.to_vec()));
+        }
+        fn stage_remove(&mut self, row: &[Value]) {
+            self.staged.push((false, row.to_vec()));
+        }
+        fn fresh_handle(&self) -> Box<dyn MutationBuffer> {
+            Box::new(Self {
+                staged: Vec::new(),
+                flushed: Arc::clone(&self.flushed),
+            })
+        }
+    }
+    impl Drop for Buffered {
+        fn drop(&mut self) {
+            self.flushed.lock().unwrap().append(&mut self.staged);
+        }
+    }
+
+    let notifications = NotificationList::default();
+    let table = TableId::new(40_000);
+    let flushed = Arc::new(Mutex::new(Vec::new()));
+    let mut original = MutationBuffers::new(&notifications, Default::default());
+    original.lazy_init(table, || {
+        Box::new(Buffered {
+            staged: Vec::new(),
+            flushed: Arc::clone(&flushed),
+        })
+    });
+    original.stage_insert(table, &[]);
+    original.lazy_init(table, || panic!("existing buffer must be reused"));
+    original.stage_remove(table, &[]);
+    assert_eq!(notifications.reset().as_slice(), &[table]);
+    assert!(flushed.lock().unwrap().is_empty());
+    // Storage is independent of the registry id, including for cloned handles.
+    assert!(original.buffers.capacity() < 16);
+    let mut cloned = original.clone();
+    cloned.stage_insert(table, &[]);
+    assert_eq!(notifications.reset().as_slice(), &[table]);
+    drop(cloned);
+    assert_eq!(*flushed.lock().unwrap(), vec![(true, vec![])]);
+    drop(original);
+    assert_eq!(
+        *flushed.lock().unwrap(),
+        vec![(true, vec![]), (true, vec![]), (false, vec![])]
+    );
+}
